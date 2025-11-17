@@ -41,6 +41,9 @@ pub enum GaffaError {
 
     #[error("Consumer not found: {0}")]
     ConsumerNotFound(String),
+
+    #[error("Compression error: {0}")]
+    Compression(String),
 }
 
 /// Result type alias for Gaffa operations

@@ -11,6 +11,7 @@ async fn start_test_broker(temp_dir: &TempDir) -> tokio::task::JoinHandle<()> {
         host: "127.0.0.1".to_string(),
         port: 19092, // Use a different port for tests
         data_dir: temp_dir.path().to_string_lossy().to_string(),
+        ..Default::default()
     };
 
     let server = BrokerServer::new(config).unwrap();

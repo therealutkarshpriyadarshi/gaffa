@@ -11,6 +11,11 @@ dashmap = { workspace = true }
 tracing = { workspace = true }
 memmap2 = { workspace = true }
 crc32fast = { workspace = true }
+# Phase 6: Compression
+flate2 = { workspace = true }
+snap = { workspace = true }
+lz4_flex = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

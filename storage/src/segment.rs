@@ -1,5 +1,7 @@
+use crate::compression::CompressionType;
 use crate::index::OffsetIndex;
 use crate::record::DiskRecord;
+use crate::retention::RetentionConfig;
 use common::{GaffaError, Result};
 use memmap2::Mmap;
 use protocol::Message;
@@ -19,6 +21,10 @@ pub struct SegmentConfig {
     pub max_size: u64,
     /// Interval for indexing (index every N records)
     pub index_interval: u32,
+    /// Compression type for new records (Phase 6)
+    pub compression: CompressionType,
+    /// Retention configuration (Phase 6)
+    pub retention: RetentionConfig,
 }
 
 impl Default for SegmentConfig {
@@ -26,7 +32,23 @@ impl Default for SegmentConfig {
         Self {
             max_size: DEFAULT_MAX_SEGMENT_SIZE,
             index_interval: 10, // Index every 10 records
+            compression: CompressionType::None,
+            retention: RetentionConfig::default(),
         }
+    }
+}
+
+impl SegmentConfig {
+    /// Create a new segment config with compression
+    pub fn with_compression(mut self, compression: CompressionType) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Create a new segment config with retention
+    pub fn with_retention(mut self, retention: RetentionConfig) -> Self {
+        self.retention = retention;
+        self
     }
 }
 
@@ -152,7 +174,11 @@ impl LogSegment {
         let mut current_position = *size;
 
         for message in messages {
-            let record = DiskRecord::new(*next_offset, message);
+            let record = if self.config.compression == CompressionType::None {
+                DiskRecord::new(*next_offset, message)
+            } else {
+                DiskRecord::new_with_compression(*next_offset, message, self.config.compression)
+            };
             let encoded = record.encode()?;
 
             // Write to log file
@@ -287,7 +313,7 @@ impl LogSegment {
 
     /// Flush pending writes to disk
     pub async fn flush(&self) -> Result<()> {
-        let mut log_file = self.log_file.write().await;
+        let log_file = self.log_file.write().await;
         log_file.sync_all()?;
 
         let mut index = self.index.write().await;
@@ -432,6 +458,7 @@ mod tests {
         let config = SegmentConfig {
             max_size: 100, // Very small for testing
             index_interval: 5,
+            ..Default::default()
         };
 
         let segment = LogSegment::create(0, dir.path(), config).unwrap();
@@ -451,6 +478,7 @@ mod tests {
         let config = SegmentConfig {
             max_size: DEFAULT_MAX_SEGMENT_SIZE,
             index_interval: 2, // Index every 2 records
+            ..Default::default()
         };
 
         let segment = LogSegment::create(0, dir.path(), config).unwrap();

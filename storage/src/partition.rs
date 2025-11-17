@@ -329,6 +329,7 @@ mod tests {
         let config = SegmentConfig {
             max_size: 200, // Very small for testing
             index_interval: 5,
+            ..Default::default()
         };
 
         let partition = Partition::with_config(

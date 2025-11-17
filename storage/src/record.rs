@@ -1,40 +1,55 @@
+use crate::compression::{compress, decompress, CompressionType};
 use common::{GaffaError, Result};
 use protocol::Message;
 use std::io::Read;
 
-/// On-disk record format with CRC32 checksums for data integrity
+/// On-disk record format with CRC32 checksums for data integrity and optional compression
 ///
-/// Format:
+/// Format (Phase 6 - with compression):
 /// [8 bytes: offset]
 /// [4 bytes: total record length (excluding offset and length fields)]
 /// [4 bytes: CRC32 checksum]
+/// [1 byte: compression type (0=None, 1=Gzip, 2=Snappy, 3=Lz4)]
 /// [8 bytes: timestamp]
 /// [4 bytes: key length (-1 if null)]
 /// [N bytes: key (if present)]
 /// [4 bytes: value length]
-/// [N bytes: value]
+/// [N bytes: value (possibly compressed)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiskRecord {
     pub offset: u64,
     pub timestamp: u64,
     pub key: Option<Vec<u8>>,
     pub value: Vec<u8>,
+    pub compression: CompressionType,
 }
 
 impl DiskRecord {
-    /// Create a new disk record
+    /// Create a new disk record without compression
     pub fn new(offset: u64, message: Message) -> Self {
         Self {
             offset,
             timestamp: message.timestamp,
             key: message.key,
             value: message.value,
+            compression: CompressionType::None,
+        }
+    }
+
+    /// Create a new disk record with compression
+    pub fn new_with_compression(offset: u64, message: Message, compression: CompressionType) -> Self {
+        Self {
+            offset,
+            timestamp: message.timestamp,
+            key: message.key,
+            value: message.value,
+            compression,
         }
     }
 
     /// Calculate the size of this record when serialized
     pub fn serialized_size(&self) -> usize {
-        let mut size = 8 + 4 + 4 + 8 + 4; // offset + length + crc + timestamp + key_length
+        let mut size = 8 + 4 + 4 + 1 + 8 + 4; // offset + length + crc + compression + timestamp + key_length
         if let Some(ref key) = self.key {
             size += key.len();
         }
@@ -45,10 +60,18 @@ impl DiskRecord {
 
     /// Encode the record to bytes with CRC32 checksum
     pub fn encode(&self) -> Result<Vec<u8>> {
-        // Calculate the body size (everything after offset and length fields)
-        let body_size = self.serialized_size() - 12; // Subtract offset (8) and length (4)
+        // Compress the value if needed
+        let value_data = compress(&self.value, self.compression)?;
 
-        let mut buffer = Vec::with_capacity(self.serialized_size());
+        // Calculate the body size (everything after offset and length fields)
+        let mut body_size = 4 + 1 + 8 + 4; // crc + compression + timestamp + key_length
+        if let Some(ref key) = self.key {
+            body_size += key.len();
+        }
+        body_size += 4; // value_length
+        body_size += value_data.len();
+
+        let mut buffer = Vec::with_capacity(12 + body_size);
 
         // Write offset
         buffer.extend_from_slice(&self.offset.to_be_bytes());
@@ -58,6 +81,11 @@ impl DiskRecord {
 
         // Prepare the data that will be checksummed (everything after CRC field)
         let mut data_to_checksum = Vec::new();
+
+        // Write compression type
+        data_to_checksum.push(self.compression.to_u8());
+
+        // Write timestamp
         data_to_checksum.extend_from_slice(&self.timestamp.to_be_bytes());
 
         // Write key length and key
@@ -68,9 +96,9 @@ impl DiskRecord {
             data_to_checksum.extend_from_slice(&(-1i32).to_be_bytes());
         }
 
-        // Write value length and value
-        data_to_checksum.extend_from_slice(&(self.value.len() as u32).to_be_bytes());
-        data_to_checksum.extend_from_slice(&self.value);
+        // Write value length and value (compressed)
+        data_to_checksum.extend_from_slice(&(value_data.len() as u32).to_be_bytes());
+        data_to_checksum.extend_from_slice(&value_data);
 
         // Calculate CRC32
         let crc = crc32fast::hash(&data_to_checksum);
@@ -124,6 +152,13 @@ impl DiskRecord {
         // Parse the data
         let mut cursor = std::io::Cursor::new(&data);
 
+        // Read compression type
+        let mut compression_buf = [0u8; 1];
+        cursor.read_exact(&mut compression_buf).map_err(|e| {
+            GaffaError::Storage(format!("Failed to read compression type: {}", e))
+        })?;
+        let compression = CompressionType::from_u8(compression_buf[0])?;
+
         // Read timestamp
         let mut timestamp_buf = [0u8; 8];
         cursor.read_exact(&mut timestamp_buf).map_err(|e| {
@@ -148,23 +183,27 @@ impl DiskRecord {
             None
         };
 
-        // Read value
+        // Read value (compressed)
         let mut value_len_buf = [0u8; 4];
         cursor.read_exact(&mut value_len_buf).map_err(|e| {
             GaffaError::Storage(format!("Failed to read value length: {}", e))
         })?;
         let value_len = u32::from_be_bytes(value_len_buf);
 
-        let mut value = vec![0u8; value_len as usize];
-        cursor.read_exact(&mut value).map_err(|e| {
+        let mut value_data = vec![0u8; value_len as usize];
+        cursor.read_exact(&mut value_data).map_err(|e| {
             GaffaError::Storage(format!("Failed to read value: {}", e))
         })?;
+
+        // Decompress value if needed
+        let value = decompress(&value_data, compression)?;
 
         Ok(DiskRecord {
             offset,
             timestamp,
             key,
             value,
+            compression,
         })
     }
 
