@@ -1,0 +1,20 @@
+[package]
+name = "examples"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "simple_producer"
+path = "simple_producer.rs"
+
+[[bin]]
+name = "simple_consumer"
+path = "simple_consumer.rs"
+
+[dependencies]
+client = { path = "../client" }
+protocol = { path = "../protocol" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
