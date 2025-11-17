@@ -50,6 +50,47 @@ pub struct Record {
     pub message: Message,
 }
 
+/// Metadata about a single partition
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PartitionMetadata {
+    /// Partition ID
+    pub id: u32,
+    /// Leader broker (for future multi-broker support)
+    pub leader: u32,
+    /// Replica brokers (for future replication support)
+    pub replicas: Vec<u32>,
+}
+
+impl PartitionMetadata {
+    /// Create new partition metadata (single-broker mode)
+    pub fn new(id: u32) -> Self {
+        Self {
+            id,
+            leader: 0, // Single broker ID
+            replicas: vec![0],
+        }
+    }
+}
+
+/// Metadata about a topic
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopicMetadata {
+    /// Topic name
+    pub name: String,
+    /// List of partitions
+    pub partitions: Vec<PartitionMetadata>,
+}
+
+impl TopicMetadata {
+    /// Create new topic metadata
+    pub fn new(name: String, partition_count: u32) -> Self {
+        let partitions = (0..partition_count)
+            .map(PartitionMetadata::new)
+            .collect();
+        Self { name, partitions }
+    }
+}
+
 /// Request types that clients can send to the broker
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
@@ -71,6 +112,16 @@ pub enum Request {
         offset: u64,
         max_messages: u32,
     },
+    /// Get metadata for specific topics (empty = all topics)
+    GetMetadata {
+        topics: Vec<String>,
+    },
+    /// Get partition count for a topic
+    GetPartitions {
+        topic: String,
+    },
+    /// List all topics
+    ListTopics,
 }
 
 /// Response types that the broker sends back to clients
@@ -104,6 +155,31 @@ pub enum Response {
     },
     /// Fetch failed
     FetchError {
+        error: String,
+    },
+    /// Metadata response
+    Metadata {
+        topics: Vec<TopicMetadata>,
+    },
+    /// Metadata error
+    MetadataError {
+        error: String,
+    },
+    /// Partition count response
+    Partitions {
+        topic: String,
+        count: u32,
+    },
+    /// Partitions error
+    PartitionsError {
+        error: String,
+    },
+    /// List of all topics
+    Topics {
+        topics: Vec<String>,
+    },
+    /// Topics list error
+    TopicsError {
         error: String,
     },
 }
@@ -159,5 +235,48 @@ mod tests {
         let serialized = bincode::serialize(&req).unwrap();
         let deserialized: Request = bincode::deserialize(&serialized).unwrap();
         matches!(deserialized, Request::CreateTopic { .. });
+    }
+
+    #[test]
+    fn test_partition_metadata() {
+        let pm = PartitionMetadata::new(0);
+        assert_eq!(pm.id, 0);
+        assert_eq!(pm.leader, 0);
+        assert_eq!(pm.replicas, vec![0]);
+    }
+
+    #[test]
+    fn test_topic_metadata() {
+        let tm = TopicMetadata::new("test-topic".to_string(), 3);
+        assert_eq!(tm.name, "test-topic");
+        assert_eq!(tm.partitions.len(), 3);
+        assert_eq!(tm.partitions[0].id, 0);
+        assert_eq!(tm.partitions[1].id, 1);
+        assert_eq!(tm.partitions[2].id, 2);
+    }
+
+    #[test]
+    fn test_metadata_serialization() {
+        let tm = TopicMetadata::new("test".to_string(), 2);
+        let serialized = bincode::serialize(&tm).unwrap();
+        let deserialized: TopicMetadata = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(tm, deserialized);
+    }
+
+    #[test]
+    fn test_get_metadata_request() {
+        let req = Request::GetMetadata {
+            topics: vec!["topic1".to_string(), "topic2".to_string()],
+        };
+        let serialized = bincode::serialize(&req).unwrap();
+        let deserialized: Request = bincode::deserialize(&serialized).unwrap();
+        matches!(deserialized, Request::GetMetadata { .. });
+    }
+
+    #[test]
+    fn test_list_topics_request() {
+        let req = Request::ListTopics;
+        let serialized = bincode::serialize(&req).unwrap();
+        let _deserialized: Request = bincode::deserialize(&serialized).unwrap();
     }
 }
