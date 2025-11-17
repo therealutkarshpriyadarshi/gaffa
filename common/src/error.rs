@@ -26,6 +26,15 @@ pub enum GaffaError {
 
     #[error("Invalid message: {0}")]
     InvalidMessage(String),
+
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    #[error("Data corruption detected: {0}")]
+    Corruption(String),
+
+    #[error("Segment not found: {0}")]
+    SegmentNotFound(String),
 }
 
 /// Result type alias for Gaffa operations
