@@ -1,6 +1,7 @@
 use common::{GaffaError, Result};
 use dashmap::DashMap;
 use protocol::{Message, Record};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::partition::Partition;
@@ -16,12 +17,51 @@ pub struct Topic {
 
 impl Topic {
     /// Create a new topic with the specified number of partitions
-    pub fn new(name: String, num_partitions: u32) -> Self {
-        let partitions = (0..num_partitions)
-            .map(|i| Arc::new(Partition::new(name.clone(), i)))
-            .collect();
+    pub fn new(name: String, num_partitions: u32, data_dir: impl AsRef<Path>) -> Result<Self> {
+        let mut partitions = Vec::new();
+        for i in 0..num_partitions {
+            let partition = Partition::new(name.clone(), i, data_dir.as_ref())?;
+            partitions.push(Arc::new(partition));
+        }
 
-        Self { name, partitions }
+        Ok(Self { name, partitions })
+    }
+
+    /// Open an existing topic from disk
+    pub fn open(name: String, data_dir: impl AsRef<Path>) -> Result<Self> {
+        let topic_dir = data_dir.as_ref().join(&name);
+
+        // Scan for partition directories
+        let mut partition_ids = Vec::new();
+        for entry in std::fs::read_dir(&topic_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(dir_name) = entry.file_name().to_str() {
+                    if let Some(id_str) = dir_name.strip_prefix("partition-") {
+                        if let Ok(id) = id_str.parse::<u32>() {
+                            partition_ids.push(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        if partition_ids.is_empty() {
+            return Err(GaffaError::Storage(format!(
+                "No partitions found for topic: {}",
+                name
+            )));
+        }
+
+        partition_ids.sort_unstable();
+
+        let mut partitions = Vec::new();
+        for id in partition_ids {
+            let partition = Partition::open(name.clone(), id, data_dir.as_ref())?;
+            partitions.push(Arc::new(partition));
+        }
+
+        Ok(Self { name, partitions })
     }
 
     /// Get the name of this topic
@@ -65,14 +105,55 @@ impl Topic {
 pub struct TopicManager {
     /// Map of topic name to Topic
     topics: Arc<DashMap<String, Arc<Topic>>>,
+    /// Data directory for topics
+    data_dir: Arc<std::path::PathBuf>,
 }
 
 impl TopicManager {
     /// Create a new topic manager
-    pub fn new() -> Self {
-        Self {
+    pub fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let data_dir = data_dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&data_dir)?;
+
+        Ok(Self {
             topics: Arc::new(DashMap::new()),
+            data_dir: Arc::new(data_dir),
+        })
+    }
+
+    /// Open existing topics from data directory
+    pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let data_dir = data_dir.as_ref().to_path_buf();
+        let topics = Arc::new(DashMap::new());
+
+        // Scan for topic directories
+        if data_dir.exists() {
+            for entry in std::fs::read_dir(&data_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    if let Some(topic_name) = entry.file_name().to_str() {
+                        match Topic::open(topic_name.to_string(), &data_dir) {
+                            Ok(topic) => {
+                                topics.insert(topic_name.to_string(), Arc::new(topic));
+                                tracing::info!(topic = %topic_name, "Opened existing topic");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    topic = %topic_name,
+                                    error = %e,
+                                    "Failed to open topic, skipping"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        Ok(Self {
+            topics,
+            data_dir: Arc::new(data_dir),
+        })
     }
 
     /// Create a new topic
@@ -84,7 +165,7 @@ impl TopicManager {
             )));
         }
 
-        let topic = Arc::new(Topic::new(name.clone(), num_partitions));
+        let topic = Arc::new(Topic::new(name.clone(), num_partitions, &*self.data_dir)?);
         self.topics.insert(name.clone(), topic.clone());
 
         tracing::info!(
@@ -115,11 +196,6 @@ impl TopicManager {
     }
 }
 
-impl Default for TopicManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -127,14 +203,16 @@ mod tests {
 
     #[test]
     fn test_topic_creation() {
-        let topic = Topic::new("test-topic".to_string(), 3);
+        let dir = tempfile::tempdir().unwrap();
+        let topic = Topic::new("test-topic".to_string(), 3, dir.path()).unwrap();
         assert_eq!(topic.name(), "test-topic");
         assert_eq!(topic.num_partitions(), 3);
     }
 
     #[test]
     fn test_topic_get_partition() {
-        let topic = Topic::new("test-topic".to_string(), 3);
+        let dir = tempfile::tempdir().unwrap();
+        let topic = Topic::new("test-topic".to_string(), 3, dir.path()).unwrap();
 
         // Valid partition
         let partition = topic.get_partition(0);
@@ -148,7 +226,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_topic_append_and_fetch() {
-        let topic = Topic::new("test-topic".to_string(), 2);
+        let dir = tempfile::tempdir().unwrap();
+        let topic = Topic::new("test-topic".to_string(), 2, dir.path()).unwrap();
 
         // Append to partition 0
         let messages = vec![
@@ -165,8 +244,27 @@ mod tests {
     }
 
     #[test]
+    fn test_topic_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create and save
+        {
+            let _topic = Topic::new("test-topic".to_string(), 2, dir.path()).unwrap();
+            // Topic is created on disk
+        }
+
+        // Reopen
+        {
+            let topic = Topic::open("test-topic".to_string(), dir.path()).unwrap();
+            assert_eq!(topic.name(), "test-topic");
+            assert_eq!(topic.num_partitions(), 2);
+        }
+    }
+
+    #[test]
     fn test_topic_manager_create() {
-        let manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = TopicManager::new(dir.path()).unwrap();
 
         // Create topic
         let result = manager.create_topic("test-topic".to_string(), 3);
@@ -182,7 +280,8 @@ mod tests {
 
     #[test]
     fn test_topic_manager_get() {
-        let manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = TopicManager::new(dir.path()).unwrap();
 
         manager.create_topic("test-topic".to_string(), 3).unwrap();
 
@@ -198,7 +297,8 @@ mod tests {
 
     #[test]
     fn test_topic_manager_list() {
-        let manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = TopicManager::new(dir.path()).unwrap();
 
         assert_eq!(manager.list_topics().len(), 0);
 
@@ -213,7 +313,8 @@ mod tests {
 
     #[test]
     fn test_topic_manager_topic_count() {
-        let manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let manager = TopicManager::new(dir.path()).unwrap();
 
         assert_eq!(manager.topic_count(), 0);
 
@@ -222,5 +323,29 @@ mod tests {
 
         manager.create_topic("topic2".to_string(), 2).unwrap();
         assert_eq!(manager.topic_count(), 2);
+    }
+
+    #[test]
+    fn test_topic_manager_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create topics
+        {
+            let manager = TopicManager::new(dir.path()).unwrap();
+            manager.create_topic("topic1".to_string(), 2).unwrap();
+            manager.create_topic("topic2".to_string(), 3).unwrap();
+        }
+
+        // Reopen and verify
+        {
+            let manager = TopicManager::open(dir.path()).unwrap();
+            assert_eq!(manager.topic_count(), 2);
+
+            let topic1 = manager.get_topic("topic1").unwrap();
+            assert_eq!(topic1.num_partitions(), 2);
+
+            let topic2 = manager.get_topic("topic2").unwrap();
+            assert_eq!(topic2.num_partitions(), 3);
+        }
     }
 }

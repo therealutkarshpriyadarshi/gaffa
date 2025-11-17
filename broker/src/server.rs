@@ -14,11 +14,23 @@ pub struct BrokerServer {
 
 impl BrokerServer {
     /// Create a new broker server
-    pub fn new(config: BrokerConfig) -> Self {
-        Self {
+    pub fn new(config: BrokerConfig) -> Result<Self> {
+        // Try to open existing topics, or create a new topic manager
+        let topic_manager = match TopicManager::open(&config.data_dir) {
+            Ok(tm) => {
+                tracing::info!("Loaded existing topics from {}", config.data_dir);
+                tm
+            }
+            Err(_) => {
+                tracing::info!("No existing topics found, creating new topic manager");
+                TopicManager::new(&config.data_dir)?
+            }
+        };
+
+        Ok(Self {
             config,
-            topic_manager: TopicManager::new(),
-        }
+            topic_manager,
+        })
     }
 
     /// Run the broker server
@@ -144,7 +156,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_create_topic() {
-        let topic_manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
 
         let request = Request::CreateTopic {
             name: "test-topic".to_string(),
@@ -164,7 +177,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_create_duplicate_topic() {
-        let topic_manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
         topic_manager.create_topic("test-topic".to_string(), 3).unwrap();
 
         let request = Request::CreateTopic {
@@ -184,7 +198,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_produce() {
-        let topic_manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
         topic_manager.create_topic("test-topic".to_string(), 3).unwrap();
 
         let messages = vec![
@@ -218,7 +233,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_produce_nonexistent_topic() {
-        let topic_manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
 
         let request = Request::Produce {
             topic: "nonexistent".to_string(),
@@ -238,7 +254,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_fetch() {
-        let topic_manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
         topic_manager.create_topic("test-topic".to_string(), 1).unwrap();
 
         // Produce some messages first
@@ -281,7 +298,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_fetch_nonexistent_topic() {
-        let topic_manager = TopicManager::new();
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
 
         let request = Request::Fetch {
             topic: "nonexistent".to_string(),

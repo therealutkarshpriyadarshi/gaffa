@@ -21,11 +21,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         host = %config.host,
         port = config.port,
+        data_dir = %config.data_dir,
         "Starting Gaffa broker"
     );
 
     // Create and run server
-    let server = BrokerServer::new(config);
+    let server = BrokerServer::new(config)?;
     server.run().await?;
 
     Ok(())

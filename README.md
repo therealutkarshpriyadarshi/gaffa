@@ -124,17 +124,17 @@ Binary protocol over TCP:
 
 ---
 
-### Phase 2: Persistent Storage Engine (Week 3-4)
+### Phase 2: Persistent Storage Engine (Week 3-4) ✅ COMPLETED
 
 **Goal**: Durable, append-only log storage on disk
 
 **Tasks**:
-1. Design on-disk record format with CRC32 checksums
-2. Implement log segment writer (append-only files)
-3. Build offset index for fast lookups
-4. Implement memory-mapped file reads
-5. Add segment rotation logic
-6. Integrate storage layer with broker
+1. ✅ Design on-disk record format with CRC32 checksums
+2. ✅ Implement log segment writer (append-only files)
+3. ✅ Build offset index for fast lookups
+4. ✅ Implement memory-mapped file reads
+5. ✅ Add segment rotation logic
+6. ✅ Integrate storage layer with broker
 
 **Deliverables**:
 - ✅ Messages persisted to disk in log files
@@ -420,4 +420,4 @@ MIT License - Feel free to use this for learning and experimentation.
 
 ---
 
-**Current Status**: Planning phase - See roadmap above for implementation schedule.
+**Current Status**: Phase 2 completed - Persistent storage engine with durable log segments, offset indexes, and memory-mapped reads. Broker now supports data persistence across restarts with automatic topic and partition recovery.

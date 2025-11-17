@@ -7,16 +7,21 @@ use protocol::Message;
 use std::time::Duration;
 use tokio::time::sleep;
 
-/// Helper function to start a broker on a random port
+/// Helper function to start a broker on a random port with a temporary data directory
 async fn start_test_broker(port: u16) -> tokio::task::JoinHandle<()> {
+    // Use a unique data directory for each test run
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let data_dir = temp_dir.path().to_str().unwrap().to_string();
+
     let config = BrokerConfig {
         host: "127.0.0.1".to_string(),
         port,
-        data_dir: format!("/tmp/gaffa-test-{}", port),
+        data_dir,
     };
 
     tokio::spawn(async move {
-        let server = broker::server::BrokerServer::new(config);
+        let _temp_dir_guard = temp_dir; // Keep temp dir alive
+        let server = broker::server::BrokerServer::new(config).expect("Failed to create broker");
         let _ = server.run().await;
     })
 }
