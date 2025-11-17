@@ -218,9 +218,11 @@ Index Format:
 **Deliverables**:
 - ✅ Consumer groups with automatic rebalancing
 - ✅ Partition assignment (round-robin strategy)
-- ✅ Offset commit/fetch
+- ✅ Offset commit/fetch with persistent storage
 - ✅ Heartbeat mechanism
 - ✅ Consumer leaves group on disconnect
+- ✅ Automatic failure detection and rebalancing
+- ✅ Auto-commit support in consumer client
 
 **Consumer Group Protocol**:
 1. Consumer sends JoinGroup request
@@ -430,4 +432,4 @@ MIT License - Feel free to use this for learning and experimentation.
 
 ---
 
-**Current Status**: Phase 3 completed - Intelligent partitioning strategies (RoundRobin, KeyHash, Sticky) with metadata discovery API. Producer supports auto-partitioning with caching. Consumer supports topic subscriptions with automatic offset tracking. All 93 tests passing. See [PHASE3.md](PHASE3.md) for details.
+**Current Status**: Phase 4 completed - Consumer groups with automatic partition assignment, persistent offset management, and heartbeat-based failure detection. Horizontal scaling of consumers with automatic rebalancing. All 92 tests passing. See [PHASE4.md](PHASE4.md) for details.

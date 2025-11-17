@@ -1,7 +1,5 @@
-mod server;
-
+use broker::BrokerServer;
 use common::config::BrokerConfig;
-use server::BrokerServer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]

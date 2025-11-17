@@ -91,6 +91,22 @@ impl TopicMetadata {
     }
 }
 
+/// Partition assignment for a consumer group member
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PartitionAssignment {
+    /// Topic name
+    pub topic: String,
+    /// Partition ID
+    pub partition: u32,
+}
+
+impl PartitionAssignment {
+    /// Create a new partition assignment
+    pub fn new(topic: String, partition: u32) -> Self {
+        Self { topic, partition }
+    }
+}
+
 /// Request types that clients can send to the broker
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
@@ -122,6 +138,35 @@ pub enum Request {
     },
     /// List all topics
     ListTopics,
+    /// Join a consumer group
+    JoinGroup {
+        group_id: String,
+        member_id: Option<String>, // None for new members
+        topics: Vec<String>,
+    },
+    /// Leave a consumer group
+    LeaveGroup {
+        group_id: String,
+        member_id: String,
+    },
+    /// Send heartbeat to maintain group membership
+    Heartbeat {
+        group_id: String,
+        member_id: String,
+    },
+    /// Commit offset for a consumer group
+    CommitOffset {
+        group_id: String,
+        topic: String,
+        partition: u32,
+        offset: u64,
+    },
+    /// Fetch committed offset for a consumer group
+    FetchOffset {
+        group_id: String,
+        topic: String,
+        partition: u32,
+    },
 }
 
 /// Response types that the broker sends back to clients
@@ -180,6 +225,53 @@ pub enum Response {
     },
     /// Topics list error
     TopicsError {
+        error: String,
+    },
+    /// Join group success with member ID and partition assignments
+    JoinGroupSuccess {
+        group_id: String,
+        member_id: String,
+        assignments: Vec<PartitionAssignment>,
+    },
+    /// Join group error
+    JoinGroupError {
+        error: String,
+    },
+    /// Leave group success
+    LeaveGroupSuccess {
+        group_id: String,
+    },
+    /// Leave group error
+    LeaveGroupError {
+        error: String,
+    },
+    /// Heartbeat acknowledged
+    HeartbeatSuccess,
+    /// Heartbeat error (possibly needs rebalance)
+    HeartbeatError {
+        error: String,
+        needs_rejoin: bool,
+    },
+    /// Offset committed successfully
+    CommitOffsetSuccess {
+        group_id: String,
+        topic: String,
+        partition: u32,
+        offset: u64,
+    },
+    /// Commit offset error
+    CommitOffsetError {
+        error: String,
+    },
+    /// Fetched offset for consumer group
+    FetchOffsetSuccess {
+        group_id: String,
+        topic: String,
+        partition: u32,
+        offset: u64,
+    },
+    /// Fetch offset error
+    FetchOffsetError {
         error: String,
     },
 }
@@ -278,5 +370,63 @@ mod tests {
         let req = Request::ListTopics;
         let serialized = bincode::serialize(&req).unwrap();
         let _deserialized: Request = bincode::deserialize(&serialized).unwrap();
+    }
+
+    #[test]
+    fn test_partition_assignment() {
+        let assignment = PartitionAssignment::new("test-topic".to_string(), 3);
+        assert_eq!(assignment.topic, "test-topic");
+        assert_eq!(assignment.partition, 3);
+
+        let serialized = bincode::serialize(&assignment).unwrap();
+        let deserialized: PartitionAssignment = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(assignment, deserialized);
+    }
+
+    #[test]
+    fn test_join_group_request() {
+        let req = Request::JoinGroup {
+            group_id: "test-group".to_string(),
+            member_id: Some("member-1".to_string()),
+            topics: vec!["topic1".to_string(), "topic2".to_string()],
+        };
+        let serialized = bincode::serialize(&req).unwrap();
+        let _deserialized: Request = bincode::deserialize(&serialized).unwrap();
+    }
+
+    #[test]
+    fn test_commit_offset_request() {
+        let req = Request::CommitOffset {
+            group_id: "test-group".to_string(),
+            topic: "test-topic".to_string(),
+            partition: 2,
+            offset: 100,
+        };
+        let serialized = bincode::serialize(&req).unwrap();
+        let _deserialized: Request = bincode::deserialize(&serialized).unwrap();
+    }
+
+    #[test]
+    fn test_heartbeat_request() {
+        let req = Request::Heartbeat {
+            group_id: "test-group".to_string(),
+            member_id: "member-1".to_string(),
+        };
+        let serialized = bincode::serialize(&req).unwrap();
+        let _deserialized: Request = bincode::deserialize(&serialized).unwrap();
+    }
+
+    #[test]
+    fn test_join_group_response() {
+        let resp = Response::JoinGroupSuccess {
+            group_id: "test-group".to_string(),
+            member_id: "member-1".to_string(),
+            assignments: vec![
+                PartitionAssignment::new("topic1".to_string(), 0),
+                PartitionAssignment::new("topic1".to_string(), 1),
+            ],
+        };
+        let serialized = bincode::serialize(&resp).unwrap();
+        let _deserialized: Response = bincode::deserialize(&serialized).unwrap();
     }
 }

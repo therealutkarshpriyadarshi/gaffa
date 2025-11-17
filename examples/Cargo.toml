@@ -19,6 +19,14 @@ path = "partitioner_producer.rs"
 name = "subscription_consumer"
 path = "subscription_consumer.rs"
 
+[[bin]]
+name = "consumer_group"
+path = "consumer_group.rs"
+
+[[bin]]
+name = "producer_for_groups"
+path = "producer_for_groups.rs"
+
 [dependencies]
 client = { path = "../client" }
 protocol = { path = "../protocol" }

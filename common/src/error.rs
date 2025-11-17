@@ -35,6 +35,12 @@ pub enum GaffaError {
 
     #[error("Segment not found: {0}")]
     SegmentNotFound(String),
+
+    #[error("Consumer group not found: {0}")]
+    GroupNotFound(String),
+
+    #[error("Consumer not found: {0}")]
+    ConsumerNotFound(String),
 }
 
 /// Result type alias for Gaffa operations
