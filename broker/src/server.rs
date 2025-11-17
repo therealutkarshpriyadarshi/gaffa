@@ -1,5 +1,7 @@
+use crate::cluster::{BrokerInfo, ClusterMetadata};
 use crate::coordinator::GroupCoordinator;
 use crate::offset_manager::OffsetManager;
+use crate::replication::ReplicationManager;
 use common::config::BrokerConfig;
 use common::Result;
 use protocol::{GaffaCodec, Request, Response};
@@ -15,6 +17,8 @@ pub struct BrokerServer {
     topic_manager: TopicManager,
     coordinator: GroupCoordinator,
     offset_manager: OffsetManager,
+    cluster: ClusterMetadata,
+    replication_manager: ReplicationManager,
 }
 
 impl BrokerServer {
@@ -38,11 +42,41 @@ impl BrokerServer {
         // Create offset manager
         let offset_manager = OffsetManager::new(&config.data_dir)?;
 
+        // Create cluster metadata
+        let cluster = ClusterMetadata::new(
+            config.broker_id,
+            Duration::from_secs(30), // Broker heartbeat timeout
+            config.max_isr_lag,
+        );
+
+        // Register this broker
+        cluster.register_broker(BrokerInfo::new(
+            config.broker_id,
+            config.host.clone(),
+            config.port,
+        ));
+
+        // Create replication manager
+        let replication_manager = ReplicationManager::new(
+            cluster.clone(),
+            topic_manager.clone(),
+            config.replication_factor,
+            config.max_isr_lag,
+        );
+
+        tracing::info!(
+            "Initialized broker {} with replication factor {}",
+            config.broker_id,
+            config.replication_factor
+        );
+
         Ok(Self {
             config,
             topic_manager,
             coordinator,
             offset_manager,
+            cluster,
+            replication_manager,
         })
     }
 
@@ -56,15 +90,25 @@ impl BrokerServer {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         let listener = TcpListener::bind(&addr).await?;
 
-        tracing::info!("Broker listening on {}", addr);
+        tracing::info!("Broker {} listening on {}", self.config.broker_id, addr);
 
-        // Start heartbeat checker task
+        // Start heartbeat checker task for consumer groups
         let coordinator = self.coordinator.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
                 interval.tick().await;
                 coordinator.check_heartbeats().await;
+            }
+        });
+
+        // Start broker health checker task
+        let replication_manager = self.replication_manager.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                replication_manager.check_broker_health().await;
             }
         });
 
@@ -75,6 +119,8 @@ impl BrokerServer {
                     let topic_manager = self.topic_manager.clone();
                     let coordinator = self.coordinator.clone();
                     let offset_manager = self.offset_manager.clone();
+                    let cluster = self.cluster.clone();
+                    let replication_manager = self.replication_manager.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -82,6 +128,8 @@ impl BrokerServer {
                             topic_manager,
                             coordinator,
                             offset_manager,
+                            cluster,
+                            replication_manager,
                         )
                         .await
                         {
@@ -103,6 +151,8 @@ async fn handle_connection(
     topic_manager: TopicManager,
     coordinator: GroupCoordinator,
     offset_manager: OffsetManager,
+    cluster: ClusterMetadata,
+    replication_manager: ReplicationManager,
 ) -> Result<()> {
     let mut framed = Framed::new(stream, GaffaCodec);
 
@@ -110,7 +160,15 @@ async fn handle_connection(
         let request = request_result?;
         tracing::debug!("Received request: {:?}", request);
 
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(
+            request,
+            &topic_manager,
+            &coordinator,
+            &offset_manager,
+            &cluster,
+            &replication_manager,
+        )
+        .await;
         tracing::debug!("Sending response: {:?}", response);
 
         framed.send(response).await?;
@@ -125,11 +183,31 @@ async fn process_request(
     topic_manager: &TopicManager,
     coordinator: &GroupCoordinator,
     offset_manager: &OffsetManager,
+    cluster: &ClusterMetadata,
+    replication_manager: &ReplicationManager,
 ) -> Response {
     match request {
         Request::CreateTopic { name, partitions } => {
             match topic_manager.create_topic(name.clone(), partitions) {
-                Ok(_) => Response::CreateTopicSuccess { name, partitions },
+                Ok(_) => {
+                    // Assign replicas for each partition
+                    for partition_id in 0..partitions {
+                        let (leader, replicas) = replication_manager
+                            .assign_partition_replicas(&name, partition_id);
+                        cluster.set_partition_replicas(
+                            name.clone(),
+                            partition_id,
+                            leader,
+                            replicas,
+                        );
+                    }
+                    tracing::info!(
+                        "Created topic '{}' with {} partitions and assigned replicas",
+                        name,
+                        partitions
+                    );
+                    Response::CreateTopicSuccess { name, partitions }
+                }
                 Err(e) => Response::CreateTopicError {
                     error: e.to_string(),
                 },
@@ -153,12 +231,20 @@ async fn process_request(
 
             // Append messages to the partition
             match topic_obj.append(partition, messages.clone()).await {
-                Ok(base_offset) => Response::ProduceSuccess {
-                    topic,
-                    partition,
-                    base_offset,
-                    count: messages.len() as u32,
-                },
+                Ok(base_offset) => {
+                    let count = messages.len() as u32;
+                    let final_offset = base_offset + count as u64;
+
+                    // Update leader offset for replication
+                    replication_manager.update_leader_offset(&topic, partition, final_offset);
+
+                    Response::ProduceSuccess {
+                        topic,
+                        partition,
+                        base_offset,
+                        count,
+                    }
+                }
                 Err(e) => Response::ProduceError {
                     error: e.to_string(),
                 },
@@ -345,6 +431,75 @@ async fn process_request(
                 },
             }
         }
+
+        Request::RegisterBroker {
+            broker_id,
+            host,
+            port,
+        } => {
+            let broker_info = BrokerInfo::new(broker_id, host, port);
+            cluster.register_broker(broker_info);
+            tracing::info!("Registered broker {}", broker_id);
+            Response::RegisterBrokerSuccess { broker_id }
+        }
+
+        Request::GetClusterMetadata => {
+            use protocol::{BrokerMetadata, TopicPartitionMetadata};
+
+            let brokers: Vec<BrokerMetadata> = cluster
+                .get_alive_brokers()
+                .iter()
+                .map(|b| BrokerMetadata {
+                    id: b.id,
+                    host: b.host.clone(),
+                    port: b.port,
+                })
+                .collect();
+
+            let topic_partitions: Vec<TopicPartitionMetadata> = cluster
+                .get_all_partition_states()
+                .iter()
+                .map(|state| TopicPartitionMetadata {
+                    topic: state.topic.clone(),
+                    partition: state.partition,
+                    leader: state.leader,
+                    replicas: state.replicas.clone(),
+                    isr: state.isr.iter().copied().collect(),
+                })
+                .collect();
+
+            Response::ClusterMetadata {
+                brokers,
+                topic_partitions,
+            }
+        }
+
+        Request::ReplicationFetch {
+            broker_id: _,
+            topic,
+            partition,
+            offset,
+        } => {
+            use crate::replication::ReplicationFetchRequest;
+
+            let request = ReplicationFetchRequest {
+                topic: topic.clone(),
+                partition,
+                offset,
+                max_records: 1000,
+            };
+
+            match replication_manager.handle_replication_fetch(request).await {
+                Some(response) => Response::ReplicationFetchSuccess {
+                    records: response.records,
+                    high_watermark: response.high_watermark,
+                    leader_epoch: response.leader_epoch,
+                },
+                None => Response::ReplicationFetchError {
+                    error: "Not the leader for this partition".to_string(),
+                },
+            }
+        }
     }
 }
 
@@ -353,21 +508,28 @@ mod tests {
     use super::*;
     use protocol::Message;
 
-    #[tokio::test]
-    async fn test_process_create_topic() {
-        let dir = tempfile::tempdir().unwrap();
+    // Helper function to create test dependencies
+    fn setup_test_env(dir: &tempfile::TempDir) -> (TopicManager, GroupCoordinator, OffsetManager, ClusterMetadata, ReplicationManager) {
         let topic_manager = TopicManager::new(dir.path()).unwrap();
         let coordinator = GroupCoordinator::new(Duration::from_secs(30));
         let offset_manager = OffsetManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let cluster = ClusterMetadata::new(0, Duration::from_secs(30), 1000);
+        cluster.register_broker(BrokerInfo::new(0, "localhost".to_string(), 9092));
+        let replication_manager = ReplicationManager::new(cluster.clone(), topic_manager.clone(), 1, 1000);
+        (topic_manager, coordinator, offset_manager, cluster, replication_manager)
+    }
+
+    #[tokio::test]
+    async fn test_process_create_topic() {
+        let dir = tempfile::tempdir().unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
 
         let request = Request::CreateTopic {
             name: "test-topic".to_string(),
             partitions: 3,
         };
 
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::CreateTopicSuccess { name, partitions } => {
@@ -381,11 +543,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_create_duplicate_topic() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
         topic_manager.create_topic("test-topic".to_string(), 3).unwrap();
 
         let request = Request::CreateTopic {
@@ -393,7 +551,7 @@ mod tests {
             partitions: 3,
         };
 
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::CreateTopicError { error } => {
@@ -406,9 +564,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_produce() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
         topic_manager.create_topic("test-topic".to_string(), 3).unwrap();
 
         let messages = vec![
@@ -422,7 +578,7 @@ mod tests {
             messages: messages.clone(),
         };
 
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::ProduceSuccess {
@@ -443,9 +599,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_produce_nonexistent_topic() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
 
         let request = Request::Produce {
             topic: "nonexistent".to_string(),
@@ -453,7 +607,7 @@ mod tests {
             messages: vec![Message::new(b"msg".to_vec())],
         };
 
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::ProduceError { error } => {
@@ -466,9 +620,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_fetch() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
         topic_manager.create_topic("test-topic".to_string(), 1).unwrap();
 
         // Produce some messages first
@@ -481,7 +633,7 @@ mod tests {
             partition: 0,
             messages,
         };
-        process_request(produce_req, &topic_manager, &coordinator, &offset_manager).await;
+        process_request(produce_req, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         // Now fetch
         let fetch_req = Request::Fetch {
@@ -491,7 +643,7 @@ mod tests {
             max_messages: 10,
         };
 
-        let response = process_request(fetch_req, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(fetch_req, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::FetchSuccess {
@@ -512,9 +664,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_fetch_nonexistent_topic() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
 
         let request = Request::Fetch {
             topic: "nonexistent".to_string(),
@@ -523,7 +673,7 @@ mod tests {
             max_messages: 10,
         };
 
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::FetchError { error } => {
@@ -536,16 +686,14 @@ mod tests {
     #[tokio::test]
     async fn test_process_list_topics() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
 
         // Create some topics
         topic_manager.create_topic("topic1".to_string(), 2).unwrap();
         topic_manager.create_topic("topic2".to_string(), 3).unwrap();
 
         let request = Request::ListTopics;
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::Topics { topics } => {
@@ -560,15 +708,13 @@ mod tests {
     #[tokio::test]
     async fn test_process_get_partitions() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
         topic_manager.create_topic("test-topic".to_string(), 5).unwrap();
 
         let request = Request::GetPartitions {
             topic: "test-topic".to_string(),
         };
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::Partitions { topic, count } => {
@@ -582,14 +728,12 @@ mod tests {
     #[tokio::test]
     async fn test_process_get_partitions_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
 
         let request = Request::GetPartitions {
             topic: "nonexistent".to_string(),
         };
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::PartitionsError { error } => {
@@ -602,9 +746,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_get_metadata_all() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
 
         topic_manager.create_topic("topic1".to_string(), 2).unwrap();
         topic_manager.create_topic("topic2".to_string(), 3).unwrap();
@@ -612,7 +754,7 @@ mod tests {
         let request = Request::GetMetadata {
             topics: vec![], // Empty = all topics
         };
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::Metadata { topics } => {
@@ -631,9 +773,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_get_metadata_specific() {
         let dir = tempfile::tempdir().unwrap();
-        let topic_manager = TopicManager::new(dir.path()).unwrap();
-        let coordinator = GroupCoordinator::new(Duration::from_secs(30));
-        let offset_manager = OffsetManager::new(dir.path()).unwrap();
+        let (topic_manager, coordinator, offset_manager, cluster, replication_manager) = setup_test_env(&dir);
 
         topic_manager.create_topic("topic1".to_string(), 2).unwrap();
         topic_manager.create_topic("topic2".to_string(), 3).unwrap();
@@ -641,7 +781,7 @@ mod tests {
         let request = Request::GetMetadata {
             topics: vec!["topic1".to_string()],
         };
-        let response = process_request(request, &topic_manager, &coordinator, &offset_manager).await;
+        let response = process_request(request, &topic_manager, &coordinator, &offset_manager, &cluster, &replication_manager).await;
 
         match response {
             Response::Metadata { topics } => {

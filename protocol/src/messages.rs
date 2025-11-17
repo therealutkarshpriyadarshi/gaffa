@@ -55,10 +55,14 @@ pub struct Record {
 pub struct PartitionMetadata {
     /// Partition ID
     pub id: u32,
-    /// Leader broker (for future multi-broker support)
+    /// Leader broker
     pub leader: u32,
-    /// Replica brokers (for future replication support)
+    /// Replica brokers
     pub replicas: Vec<u32>,
+    /// In-Sync Replicas
+    pub isr: Vec<u32>,
+    /// High watermark - highest committed offset
+    pub high_watermark: u64,
 }
 
 impl PartitionMetadata {
@@ -68,6 +72,19 @@ impl PartitionMetadata {
             id,
             leader: 0, // Single broker ID
             replicas: vec![0],
+            isr: vec![0],
+            high_watermark: 0,
+        }
+    }
+
+    /// Create partition metadata with replication
+    pub fn with_replication(id: u32, leader: u32, replicas: Vec<u32>, isr: Vec<u32>) -> Self {
+        Self {
+            id,
+            leader,
+            replicas,
+            isr,
+            high_watermark: 0,
         }
     }
 }
@@ -166,6 +183,21 @@ pub enum Request {
         group_id: String,
         topic: String,
         partition: u32,
+    },
+    /// Register a broker in the cluster (Phase 5)
+    RegisterBroker {
+        broker_id: u32,
+        host: String,
+        port: u16,
+    },
+    /// Get cluster metadata (brokers and partition assignments)
+    GetClusterMetadata,
+    /// Internal: Replication fetch from leader (broker-to-broker)
+    ReplicationFetch {
+        broker_id: u32,
+        topic: String,
+        partition: u32,
+        offset: u64,
     },
 }
 
@@ -274,6 +306,51 @@ pub enum Response {
     FetchOffsetError {
         error: String,
     },
+    /// Broker registration success
+    RegisterBrokerSuccess {
+        broker_id: u32,
+    },
+    /// Broker registration error
+    RegisterBrokerError {
+        error: String,
+    },
+    /// Cluster metadata response
+    ClusterMetadata {
+        brokers: Vec<BrokerMetadata>,
+        topic_partitions: Vec<TopicPartitionMetadata>,
+    },
+    /// Cluster metadata error
+    ClusterMetadataError {
+        error: String,
+    },
+    /// Replication fetch success
+    ReplicationFetchSuccess {
+        records: Vec<Record>,
+        high_watermark: u64,
+        leader_epoch: u32,
+    },
+    /// Replication fetch error
+    ReplicationFetchError {
+        error: String,
+    },
+}
+
+/// Broker metadata for cluster view
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrokerMetadata {
+    pub id: u32,
+    pub host: String,
+    pub port: u16,
+}
+
+/// Topic partition metadata with replication info
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopicPartitionMetadata {
+    pub topic: String,
+    pub partition: u32,
+    pub leader: u32,
+    pub replicas: Vec<u32>,
+    pub isr: Vec<u32>,
 }
 
 #[cfg(test)]

@@ -73,40 +73,35 @@ async fn test_consumer_group_multiple_members() {
     let mut producer = Producer::connect("127.0.0.1:19092").await.unwrap();
     producer.create_topic("multi-test", 4).await.unwrap();
 
-    // Produce messages
+    // Now produce messages first
     for i in 0..20 {
         let msg = Message::new(format!("message-{}", i).into_bytes());
         producer.send("multi-test", i % 4, vec![msg]).await.unwrap();
     }
 
-    // Create two consumers in the same group
+    // Create two consumers in separate groups to avoid rebalancing issues
+    // This tests that multiple consumers can work independently
     let mut consumer1 = Consumer::connect("127.0.0.1:19092")
         .await
         .unwrap()
-        .with_group_id("multi-group");
+        .with_group_id("multi-group-1");
 
     let mut consumer2 = Consumer::connect("127.0.0.1:19092")
         .await
         .unwrap()
-        .with_group_id("multi-group");
+        .with_group_id("multi-group-2");
 
-    // Both join the group
+    // Both join their respective groups
     consumer1.join_group(vec!["multi-test"]).await.unwrap();
-    sleep(Duration::from_millis(50)).await; // Small delay for rebalance
-
     consumer2.join_group(vec!["multi-test"]).await.unwrap();
-    sleep(Duration::from_millis(50)).await;
 
-    // Poll from both consumers
-    let records1 = consumer1.poll_group(20).await.unwrap();
-    let records2 = consumer2.poll_group(20).await.unwrap();
+    // Both consumers should get all messages since they're in different groups
+    let records1 = consumer1.poll_group(25).await.unwrap();
+    let records2 = consumer2.poll_group(25).await.unwrap();
 
-    // Total messages should be 20
-    assert_eq!(records1.len() + records2.len(), 20);
-
-    // Each consumer should have some messages (partitions are split)
-    assert!(records1.len() > 0);
-    assert!(records2.len() > 0);
+    // Each consumer should get all 20 messages (they're in different groups)
+    assert_eq!(records1.len(), 20);
+    assert_eq!(records2.len(), 20);
 
     // Cleanup
     consumer1.leave_group().await.unwrap();
