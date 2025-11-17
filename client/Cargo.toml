@@ -1,0 +1,17 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common" }
+protocol = { path = "../protocol" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
