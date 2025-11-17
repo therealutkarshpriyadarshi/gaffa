@@ -146,6 +146,55 @@ async fn process_request(request: Request, topic_manager: &TopicManager) -> Resp
                 },
             }
         }
+
+        Request::GetMetadata { topics } => {
+            use protocol::TopicMetadata;
+
+            // If topics list is empty, return metadata for all topics
+            let topic_names = if topics.is_empty() {
+                topic_manager.list_topics()
+            } else {
+                topics
+            };
+
+            let mut metadata_list = Vec::new();
+            for topic_name in topic_names {
+                match topic_manager.get_topic(&topic_name) {
+                    Ok(topic) => {
+                        let metadata = TopicMetadata::new(
+                            topic_name.clone(),
+                            topic.num_partitions(),
+                        );
+                        metadata_list.push(metadata);
+                    }
+                    Err(_) => {
+                        // Skip non-existent topics
+                        continue;
+                    }
+                }
+            }
+
+            Response::Metadata {
+                topics: metadata_list,
+            }
+        }
+
+        Request::GetPartitions { topic } => {
+            match topic_manager.get_topic(&topic) {
+                Ok(topic_obj) => Response::Partitions {
+                    topic,
+                    count: topic_obj.num_partitions(),
+                },
+                Err(e) => Response::PartitionsError {
+                    error: e.to_string(),
+                },
+            }
+        }
+
+        Request::ListTopics => {
+            let topics = topic_manager.list_topics();
+            Response::Topics { topics }
+        }
     }
 }
 
@@ -315,6 +364,116 @@ mod tests {
                 assert!(error.contains("not found"));
             }
             _ => panic!("Expected FetchError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_list_topics() {
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
+
+        // Create some topics
+        topic_manager.create_topic("topic1".to_string(), 2).unwrap();
+        topic_manager.create_topic("topic2".to_string(), 3).unwrap();
+
+        let request = Request::ListTopics;
+        let response = process_request(request, &topic_manager).await;
+
+        match response {
+            Response::Topics { topics } => {
+                assert_eq!(topics.len(), 2);
+                assert!(topics.contains(&"topic1".to_string()));
+                assert!(topics.contains(&"topic2".to_string()));
+            }
+            _ => panic!("Expected Topics"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_get_partitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
+        topic_manager.create_topic("test-topic".to_string(), 5).unwrap();
+
+        let request = Request::GetPartitions {
+            topic: "test-topic".to_string(),
+        };
+        let response = process_request(request, &topic_manager).await;
+
+        match response {
+            Response::Partitions { topic, count } => {
+                assert_eq!(topic, "test-topic");
+                assert_eq!(count, 5);
+            }
+            _ => panic!("Expected Partitions"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_get_partitions_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
+
+        let request = Request::GetPartitions {
+            topic: "nonexistent".to_string(),
+        };
+        let response = process_request(request, &topic_manager).await;
+
+        match response {
+            Response::PartitionsError { error } => {
+                assert!(error.contains("not found"));
+            }
+            _ => panic!("Expected PartitionsError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_get_metadata_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
+
+        topic_manager.create_topic("topic1".to_string(), 2).unwrap();
+        topic_manager.create_topic("topic2".to_string(), 3).unwrap();
+
+        let request = Request::GetMetadata {
+            topics: vec![], // Empty = all topics
+        };
+        let response = process_request(request, &topic_manager).await;
+
+        match response {
+            Response::Metadata { topics } => {
+                assert_eq!(topics.len(), 2);
+
+                let topic1 = topics.iter().find(|t| t.name == "topic1").unwrap();
+                assert_eq!(topic1.partitions.len(), 2);
+
+                let topic2 = topics.iter().find(|t| t.name == "topic2").unwrap();
+                assert_eq!(topic2.partitions.len(), 3);
+            }
+            _ => panic!("Expected Metadata"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_get_metadata_specific() {
+        let dir = tempfile::tempdir().unwrap();
+        let topic_manager = TopicManager::new(dir.path()).unwrap();
+
+        topic_manager.create_topic("topic1".to_string(), 2).unwrap();
+        topic_manager.create_topic("topic2".to_string(), 3).unwrap();
+
+        let request = Request::GetMetadata {
+            topics: vec!["topic1".to_string()],
+        };
+        let response = process_request(request, &topic_manager).await;
+
+        match response {
+            Response::Metadata { topics } => {
+                assert_eq!(topics.len(), 1);
+                assert_eq!(topics[0].name, "topic1");
+                assert_eq!(topics[0].partitions.len(), 2);
+            }
+            _ => panic!("Expected Metadata"),
         }
     }
 }

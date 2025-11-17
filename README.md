@@ -168,28 +168,38 @@ Index Format:
 
 ---
 
-### Phase 3: Partitions & Topics (Week 5)
+### Phase 3: Partitions & Topics (Week 5) ✅ COMPLETED
 
-**Goal**: Multiple partitions per topic, parallel processing
+**Goal**: Multiple partitions per topic, parallel processing, intelligent partitioning
 
 **Tasks**:
-1. Implement Topic with multiple partitions
-2. Update partition to use persistent log
-3. Add partitioning strategies (round-robin, key-hash)
-4. Enable parallel writes to different partitions
-5. Update protocol for partition-aware requests
+1. ✅ Implement Topic with multiple partitions
+2. ✅ Update partition to use persistent log
+3. ✅ Add partitioning strategies (round-robin, key-hash, sticky)
+4. ✅ Enable parallel writes to different partitions
+5. ✅ Update protocol for partition-aware requests
+6. ✅ Add metadata discovery API (GetMetadata, GetPartitions, ListTopics)
+7. ✅ Implement auto-partitioning producer with caching
+8. ✅ Implement topic subscription consumer with offset tracking
 
 **Deliverables**:
 - ✅ Topics with configurable partition count
 - ✅ Each partition has independent log
-- ✅ Producer partitioning strategies
+- ✅ Producer partitioning strategies (RoundRobin, KeyHash, Sticky)
 - ✅ Parallel writes to different partitions
 - ✅ Consumer can read from specific partition
+- ✅ Metadata API for partition discovery
+- ✅ Auto-partitioning producer
+- ✅ Topic subscription consumer
+- ✅ Automatic offset tracking
 
 **Partitioning Strategies**:
-- **Round-robin**: Distribute evenly across partitions
-- **Key-hash**: Same key always goes to same partition (ordering guarantee)
-- **Custom**: User-defined partitioning logic
+- **RoundRobin**: Distribute evenly across partitions (default)
+- **KeyHash**: Same key always goes to same partition (ordering guarantee)
+- **Sticky**: Stick to partition for batch efficiency
+- **Custom**: Implement Partitioner trait
+
+**See [PHASE3.md](PHASE3.md) for detailed implementation documentation**
 
 ---
 
@@ -420,4 +430,4 @@ MIT License - Feel free to use this for learning and experimentation.
 
 ---
 
-**Current Status**: Phase 2 completed - Persistent storage engine with durable log segments, offset indexes, and memory-mapped reads. Broker now supports data persistence across restarts with automatic topic and partition recovery.
+**Current Status**: Phase 3 completed - Intelligent partitioning strategies (RoundRobin, KeyHash, Sticky) with metadata discovery API. Producer supports auto-partitioning with caching. Consumer supports topic subscriptions with automatic offset tracking. All 93 tests passing. See [PHASE3.md](PHASE3.md) for details.
