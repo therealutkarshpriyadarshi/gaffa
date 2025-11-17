@@ -92,6 +92,7 @@ async fn test_segment_rotation_persistence() {
     let config = SegmentConfig {
         max_size: 500, // Very small for testing
         index_interval: 5,
+        ..Default::default()
     };
 
     let partition = storage::Partition::with_config(

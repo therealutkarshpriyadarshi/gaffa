@@ -17,6 +17,7 @@ async fn start_test_broker(port: u16) -> tokio::task::JoinHandle<()> {
         host: "127.0.0.1".to_string(),
         port,
         data_dir,
+        ..Default::default()
     };
 
     tokio::spawn(async move {
